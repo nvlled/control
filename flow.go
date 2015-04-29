@@ -4,20 +4,27 @@ import (
 	term "github.com/nsf/termbox-go"
 )
 
-type Flow struct {
-	c          chan interface{}
-	stopped    bool
-	mu         *Mutex
-	counter    *streamCounter
-	prev       *Flow
-	next       *Flow
+type Opts struct {
 	EventEnded func(interface{})
 }
 
-type Interrupt func(e interface{}, stop func())
-type controller func(*Flow)
+type Flow struct {
+	c       chan interface{}
+	stopped bool
+	mu      *Mutex
+	counter *streamCounter
+	prev    *Flow
+	next    *Flow
+	opts    Opts
+}
 
-var NoInterrupt = func(_ interface{}, _ func()) {}
+
+type Interrupt func(e interface{}, stop func())
+
+type Fn func(*Flow, interface{})
+type TermFn func(*Flow, term.Event)
+
+type Source func() (interface{}, bool)
 
 func NewFlow() *Flow {
 	return &Flow{
@@ -50,7 +57,7 @@ func (flow *Flow) stopAll() {
 	}
 }
 
-func (flow *Flow) Halt() {
+func (flow *Flow) Stop() {
 	go flow.stopAll()
 }
 
@@ -63,16 +70,7 @@ func (flow *Flow) Send(e interface{}) {
 	}
 }
 
-func TermFn(fn func(term.Event) bool) func(interface{}) bool {
-	return func(e interface{}) bool {
-		if e, ok := e.(term.Event); ok {
-			return fn(e)
-		}
-		return false
-	}
-}
-
-func (flow *Flow) Map(fn func(interface{}) bool) {
+func (flow *Flow) each(fn func(interface{})) {
 	decreaseCounter := func() {
 		t := flow
 		for t != nil {
@@ -82,33 +80,22 @@ func (flow *Flow) Map(fn func(interface{}) bool) {
 	}
 	decreaseCounter()
 	for e := range flow.c {
-		stop := fn(e)
-		if stop {
-			break
-		}
-		if flow.EventEnded != nil {
-			flow.EventEnded(e)
+		fn(e)
+		if flow.opts.EventEnded != nil {
+			flow.opts.EventEnded(e)
 		}
 		decreaseCounter()
 	}
 }
 
-func (flow *Flow) Switch(keymap map[term.Key]func()) {
-	flow.Map(TermFn(func(e term.Event) bool {
-		if handler, ok := keymap[e.Key]; ok {
-			handler()
-		}
-		return false
-	}))
-}
-
-func (flow *Flow) Transfer(ctrler controller, intp Interrupt) {
+// TODO: add opts arg
+func (flow *Flow) Transfer(fn Fn, interrupts ...Interrupt) {
 	flow.mu.Exec(func() {
 		if flow.next != nil {
 			panic("y-you broke it")
 		}
 		nextFlow := NewFlow()
-		nextFlow.EventEnded = flow.EventEnded
+		nextFlow.opts = flow.opts
 		flow.next = nextFlow
 		nextFlow.prev = flow
 
@@ -119,7 +106,9 @@ func (flow *Flow) Transfer(ctrler controller, intp Interrupt) {
 			for !flow.stopped {
 				select {
 				case e := <-flow.c:
-					intp(e, stop)
+					for _, intp := range interrupts {
+						intp(e, stop)
+					}
 					if !flow.stopped {
 						flow.counter.Inc()
 						func() {
@@ -132,11 +121,19 @@ func (flow *Flow) Transfer(ctrler controller, intp Interrupt) {
 				}
 			}
 		}()
-		ctrler(nextFlow)
+
+		nextFlow.each(func(e interface{}) {
+			fn(nextFlow, e)
+		})
+
 		nextFlow.stop()
 		kill <- 1
 		flow.next = nil
 	})
+}
+
+func (flow *Flow) TermTransfer(fn TermFn, interrupts ...Interrupt) {
+	flow.Transfer(AsTermFn(fn), interrupts...)
 }
 
 func Interrupts(intps ...Interrupt) Interrupt {
@@ -167,14 +164,33 @@ func KeyInterrupt(keys ...term.Key) Interrupt {
 	}
 }
 
-func SendEvents(flow *Flow) {
-	for {
-		e := term.PollEvent()
-		flow.Send(e)
+func TermSource() (interface{}, bool) {
+	return term.PollEvent(), true
+}
+
+func AsTermFn(fn func(*Flow, term.Event)) Fn {
+	return func(flow *Flow, e interface{}) {
+		if e, ok := e.(term.Event); ok {
+			fn(flow, e)
+		}
 	}
 }
 
-func StartControl(ctrl controller) {
+func Transfer(source Source, opts Opts, fn Fn, interrupts ...Interrupt) {
 	flow := NewFlow()
-	flow.Transfer(ctrl, NoInterrupt)
+	flow.opts = opts
+	go func() {
+		for {
+			e, ok := source()
+			if !ok {
+				break
+			}
+			flow.Send(e)
+		}
+	}()
+	flow.Transfer(fn, interrupts...)
+}
+
+func TermTransfer(source Source, opts Opts, fn TermFn, interrupts ...Interrupt) {
+	Transfer(source, opts, AsTermFn(fn), interrupts...)
 }
