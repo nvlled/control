@@ -11,52 +11,58 @@ func TestEvents(t *testing.T) {
 	testRun := func(input, expected string) {
 		result := ""
 		ecount := 0
-		flow := NewFlow()
-		flow.EventEnded = func(_ interface{}) {
-			ecount++
-		}
 
+		events := make(chan interface{})
 		go func() {
 			cs := []rune(input)
 			for _, c := range cs {
-				time.Sleep(time.Duration(rand.Intn(20)) * time.Millisecond)
-				flow.Send(term.Event{Ch: c})
+				time.Sleep(time.Duration(rand.Intn(10)) * time.Millisecond)
+				events <- term.Event{Ch: c}
 			}
-			time.Sleep(time.Duration(rand.Intn(20)) * time.Millisecond)
-			flow.stopAll()
+			time.Sleep(time.Duration(rand.Intn(10)) * time.Millisecond)
+			events <- 1
 		}()
-		flow.Map(TermFn(func(e term.Event) bool {
-			switch e.Ch {
-			case 'B':
-				flow.Transfer(func(flow *Flow) {
-					flow.Map(TermFn(func(e term.Event) bool {
-						result += "_B" + string(e.Ch)
-						return false
-					}))
-				}, CharInterrupt('b'))
+		source := func() (interface{}, bool) {
+			e, ok := <-events
+			return e, ok
+		}
 
-			case 'C':
-				flow.Transfer(func(flow *Flow) {
-					flow.Map(TermFn(func(e term.Event) bool {
+		TermTransfer(
+			source,
+			Opts{EventEnded: func(_ interface{}) {
+				ecount++
+			}},
+			func(flow *Flow, e term.Event) {
+				switch e.Ch {
+				case 'B':
+					flow.TermTransfer(
+						func(flow *Flow, e term.Event) {
+							result += "_B" + string(e.Ch)
+						},
+						CharInterrupt('b'),
+					)
+				case 'C':
+					flow.TermTransfer(func(flow *Flow, e term.Event) {
 						switch e.Ch {
 						case 'E':
-							flow.Transfer(func(flow *Flow) {
-								flow.Map(TermFn(func(e term.Event) bool {
-									result += "_E" + string(e.Ch)
-									return false
-								}))
+							flow.TermTransfer(func(_ *Flow, e term.Event) {
+								result += "_E" + string(e.Ch)
 							}, CharInterrupt('e'))
 						default:
 							result += "_C" + string(e.Ch)
 						}
-						return false
-					}))
-				}, CharInterrupt('c'))
-			default:
-				result += "_A" + string(e.Ch)
-			}
-			return false
-		}))
+					}, CharInterrupt('c'))
+				default:
+					result += "_A" + string(e.Ch)
+				}
+			},
+			func(e interface{}, stop func()) {
+				if _, ok := e.(int); ok {
+					stop()
+				}
+			},
+		)
+
 		println(">"+input, ecount)
 		if result != expected {
 			t.Error("expected", expected, "got", result)
