@@ -11,6 +11,7 @@ func TestEvents(t *testing.T) {
 	testRun := func(input, expected string) {
 		result := ""
 		ecount := 0
+		bcount := 0
 
 		events := make(chan interface{})
 		go func() {
@@ -27,43 +28,56 @@ func TestEvents(t *testing.T) {
 			return e, ok
 		}
 
-		TermTransfer(
+		TermStart(
 			source,
-			Opts{EventEnded: func(_ interface{}) {
-				ecount++
-			}},
+			Opts{
+				EventEnded: func(_ interface{}) {
+					ecount++
+				},
+				Interrupt: func(e interface{}, stop func()) {
+					if _, ok := e.(int); ok {
+						stop()
+					}
+				},
+			},
 			func(flow *Flow, e term.Event) {
 				switch e.Ch {
 				case 'B':
-					flow.TermTransfer(
-						func(flow *Flow, e term.Event) {
-							result += "_B" + string(e.Ch)
+					flow.New(
+						Opts{
+							Interrupt: CharInterrupt('b'),
+							EventEnded: func(e interface{}) {
+								bcount++
+							},
 						},
-						CharInterrupt('b'),
+						func(flow *Flow) {
+							flow.TermTransfer(Opts{}, func(_ *Flow, e term.Event) {
+								result += "_B" + string(e.Ch)
+							})
+						},
 					)
 				case 'C':
-					flow.TermTransfer(func(flow *Flow, e term.Event) {
-						switch e.Ch {
-						case 'E':
-							flow.TermTransfer(func(_ *Flow, e term.Event) {
-								result += "_E" + string(e.Ch)
-							}, CharInterrupt('e'))
-						default:
-							result += "_C" + string(e.Ch)
-						}
-					}, CharInterrupt('c'))
+					flow.TermTransfer(
+						Opts{Interrupt: CharInterrupt('c')},
+						func(flow *Flow, e term.Event) {
+							switch e.Ch {
+							case 'E':
+								flow.TermTransfer(
+									Opts{Interrupt: CharInterrupt('e')},
+									func(_ *Flow, e term.Event) {
+										result += "_E" + string(e.Ch)
+									})
+							default:
+								result += "_C" + string(e.Ch)
+							}
+						})
 				default:
 					result += "_A" + string(e.Ch)
 				}
 			},
-			func(e interface{}, stop func()) {
-				if _, ok := e.(int); ok {
-					stop()
-				}
-			},
 		)
 
-		println(">"+input, ecount)
+		println(">"+input, ecount, "|", bcount)
 		if result != expected {
 			t.Error("expected", expected, "got", result)
 		}
