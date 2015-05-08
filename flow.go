@@ -4,25 +4,27 @@ import (
 	term "github.com/nsf/termbox-go"
 )
 
+type Interrupt func(e interface{}, stop func())
+
 type Opts struct {
 	EventEnded func(interface{})
+	Interrupt  Interrupt
 }
 
 type Flow struct {
-	c       chan interface{}
-	stopped bool
-	mu      *Mutex
-	counter *streamCounter
-	prev    *Flow
-	next    *Flow
-	opts    Opts
+	c          chan interface{}
+	stopped    bool
+	mu         *Mutex
+	counter    *streamCounter
+	prev       *Flow
+	next       *Flow
+	EventEnded func(interface{})
 }
 
+type Efn func(*Flow)
+type Tfn func(*Flow, interface{})
 
-type Interrupt func(e interface{}, stop func())
-
-type Fn func(*Flow, interface{})
-type TermFn func(*Flow, term.Event)
+type Keymap map[term.Key]func(*Flow)
 
 type Source func() (interface{}, bool)
 
@@ -81,34 +83,49 @@ func (flow *Flow) each(fn func(interface{})) {
 	decreaseCounter()
 	for e := range flow.c {
 		fn(e)
-		if flow.opts.EventEnded != nil {
-			flow.opts.EventEnded(e)
+		if flow.EventEnded != nil {
+			flow.EventEnded(e)
 		}
 		decreaseCounter()
 	}
 }
 
-// TODO: add opts arg
-func (flow *Flow) Transfer(fn Fn, interrupts ...Interrupt) {
+func combineEventEnded(fn1, fn2 func(interface{})) func(interface{}) {
+	if fn1 == nil {
+		return fn2
+	}
+	if fn2 == nil {
+		return fn1
+	}
+	return func(e interface{}) {
+		fn1(e)
+		fn2(e)
+	}
+}
+
+func (flow *Flow) run(opts Opts, body func(*Flow)) {
+	if flow.stopped {
+		panic("Cannot transfer control of a dead flow")
+	}
 	flow.mu.Exec(func() {
 		if flow.next != nil {
 			panic("y-you broke it")
 		}
 		nextFlow := NewFlow()
-		nextFlow.opts = flow.opts
 		flow.next = nextFlow
 		nextFlow.prev = flow
-
-		stop := func() { nextFlow.stopAll() }
+		nextFlow.EventEnded = combineEventEnded(flow.EventEnded, opts.EventEnded)
 
 		kill := make(chan int, 1)
 		go func() {
 			for !flow.stopped {
 				select {
 				case e := <-flow.c:
-					for _, intp := range interrupts {
-						intp(e, stop)
+
+					if opts.Interrupt != nil {
+						opts.Interrupt(e, nextFlow.stopAll)
 					}
+
 					if !flow.stopped {
 						flow.counter.Inc()
 						func() {
@@ -122,9 +139,7 @@ func (flow *Flow) Transfer(fn Fn, interrupts ...Interrupt) {
 			}
 		}()
 
-		nextFlow.each(func(e interface{}) {
-			fn(nextFlow, e)
-		})
+		body(nextFlow)
 
 		nextFlow.stop()
 		kill <- 1
@@ -132,13 +147,51 @@ func (flow *Flow) Transfer(fn Fn, interrupts ...Interrupt) {
 	})
 }
 
-func (flow *Flow) TermTransfer(fn TermFn, interrupts ...Interrupt) {
-	flow.Transfer(AsTermFn(fn), interrupts...)
+func (flow *Flow) New(opts Opts, fn Efn) {
+	flow.run(opts, func(nextFlow *Flow) {
+		fn(nextFlow)
+	})
+}
+
+func (flow *Flow) Transfer(opts Opts, fn Tfn) {
+	flow.run(opts, func(nextFlow *Flow) {
+		nextFlow.each(func(e interface{}) {
+			fn(nextFlow, e)
+		})
+	})
+}
+
+func (flow *Flow) TermTransfer(opts Opts, fn func(*Flow, term.Event)) {
+	flow.Transfer(opts, OfTermTfn(fn))
+}
+
+func (flow *Flow) TermSwitch(opts Opts, keymap Keymap) {
+	flow.TermTransfer(opts, func(flow *Flow, e term.Event) {
+		if fn, ok := keymap[e.Key]; ok {
+			fn(flow)
+		}
+	})
+}
+
+func OfTermTfn(fn func(*Flow, term.Event)) Tfn {
+	return func(flow *Flow, e interface{}) {
+		if e, ok := e.(term.Event); ok {
+			fn(flow, e)
+		}
+	}
 }
 
 func Interrupts(intps ...Interrupt) Interrupt {
 	return func(e interface{}, stop func()) {
 		for _, fn := range intps {
+			fn(e, stop)
+		}
+	}
+}
+
+func TermInterrupt(fn func(term.Event, func())) Interrupt {
+	return func(e interface{}, stop func()) {
+		if e, ok := e.(term.Event); ok {
 			fn(e, stop)
 		}
 	}
@@ -168,17 +221,8 @@ func TermSource() (interface{}, bool) {
 	return term.PollEvent(), true
 }
 
-func AsTermFn(fn func(*Flow, term.Event)) Fn {
-	return func(flow *Flow, e interface{}) {
-		if e, ok := e.(term.Event); ok {
-			fn(flow, e)
-		}
-	}
-}
-
-func Transfer(source Source, opts Opts, fn Fn, interrupts ...Interrupt) {
+func New(source Source, opts Opts, fn Efn) {
 	flow := NewFlow()
-	flow.opts = opts
 	go func() {
 		for {
 			e, ok := source()
@@ -188,9 +232,25 @@ func Transfer(source Source, opts Opts, fn Fn, interrupts ...Interrupt) {
 			flow.Send(e)
 		}
 	}()
-	flow.Transfer(fn, interrupts...)
+	flow.New(opts, fn)
+	flow.stop()
 }
 
-func TermTransfer(source Source, opts Opts, fn TermFn, interrupts ...Interrupt) {
-	Transfer(source, opts, AsTermFn(fn), interrupts...)
+func Start(source Source, opts Opts, fn Tfn) {
+	flow := NewFlow()
+	go func() {
+		for {
+			e, ok := source()
+			if !ok {
+				break
+			}
+			flow.Send(e)
+		}
+	}()
+	flow.Transfer(opts, fn)
+	flow.stop()
+}
+
+func TermStart(source Source, opts Opts, fn func(*Flow, term.Event)) {
+	Start(source, opts, OfTermTfn(fn))
 }
