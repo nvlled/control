@@ -1,17 +1,21 @@
 package control
 
+import (
+	"sync"
+)
+
 // no generics...........
 type Emitter struct {
 	ids       int
 	listeners map[int]func(interface{})
-	mu        *Mutex
+	mu        sync.Mutex
 }
 
 func NewEmitter() *Emitter {
 	return &Emitter{
 		ids:       1,
 		listeners: make(map[int]func(interface{})),
-		mu:        NewMutex(),
+		mu:        sync.Mutex{},
 	}
 }
 
@@ -23,11 +27,11 @@ func (em Emitter) Emit(e interface{}) {
 
 func (em Emitter) Listen(listener func(interface{})) int {
 	var id int
-	em.mu.Exec(func() {
-		id = em.ids
-		em.listeners[id] = listener
-		em.ids++
-	})
+	em.mu.Lock()
+	id = em.ids
+	em.listeners[id] = listener
+	em.ids++
+	em.mu.Unlock()
 	return id
 }
 
