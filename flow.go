@@ -1,20 +1,22 @@
 package control
 
 import (
+	"errors"
 	term "github.com/nsf/termbox-go"
 )
 
 type Interrupt func(e interface{}, stop func())
 
 type Opts struct {
-	EventEnded func(interface{})
-	Interrupt  Interrupt
+	EventEnded      func(interface{})
+	Interrupt       Interrupt
+	PanicOnDeadFlow bool
 }
 
 type Flow struct {
-	c          chan interface{}
-	stopped    bool
-	mu         *Mutex
+	c       chan interface{}
+	stopped bool
+	//mu         *sync.Mutex
 	counter    *streamCounter
 	prev       *Flow
 	next       *Flow
@@ -32,7 +34,6 @@ func NewFlow() *Flow {
 	return &Flow{
 		c:       make(chan interface{}, 1),
 		stopped: false,
-		mu:      NewMutex(),
 		counter: newCounter(),
 	}
 }
@@ -60,6 +61,7 @@ func (flow *Flow) stopAll() {
 }
 
 func (flow *Flow) Stop() {
+	// not creating a goroutine here will result in a lockup
 	go flow.stopAll()
 }
 
@@ -103,48 +105,60 @@ func combineEventEnded(fn1, fn2 func(interface{})) func(interface{}) {
 	}
 }
 
+var closedError = errors.New("cannot ransfer control of a dead flow")
+
 func (flow *Flow) run(opts Opts, body func(*Flow)) {
 	if flow.stopped {
-		panic("Cannot transfer control of a dead flow")
-	}
-	flow.mu.Exec(func() {
-		if flow.next != nil {
-			panic("y-you broke it")
+		if opts.PanicOnDeadFlow {
+			panic(closedError)
 		}
-		nextFlow := NewFlow()
-		flow.next = nextFlow
-		nextFlow.prev = flow
-		nextFlow.EventEnded = combineEventEnded(flow.EventEnded, opts.EventEnded)
+		return
+	}
+	if flow.next != nil {
+		panic("multithread access to flow not allowed")
+	}
+	nextFlow := NewFlow()
+	flow.next = nextFlow
+	nextFlow.prev = flow
+	nextFlow.EventEnded = combineEventEnded(flow.EventEnded, opts.EventEnded)
 
-		kill := make(chan int, 1)
-		go func() {
-			for !flow.stopped {
-				select {
-				case e := <-flow.c:
+	kill := make(chan int, 1)
+	go func() {
+		for !flow.stopped {
+			select {
+			case e := <-flow.c:
 
-					if opts.Interrupt != nil {
-						opts.Interrupt(e, nextFlow.stopAll)
-					}
-
-					if !flow.stopped {
-						flow.counter.Inc()
-						func() {
-							defer func() { recover() }()
-							nextFlow.c <- e
-						}()
-					}
-				case <-kill:
-					return
+				if opts.Interrupt != nil {
+					opts.Interrupt(e, nextFlow.stopAll)
 				}
+
+				if !flow.stopped {
+					flow.counter.Inc()
+					func() {
+						defer func() { recover() }()
+						nextFlow.c <- e
+					}()
+				}
+			case <-kill:
+				return
+			}
+		}
+	}()
+
+	func() {
+		defer func() {
+			err := recover()
+			if err != nil && err != closedError {
+				// TODO: lookup proper rethrowing of an error
+				panic(err) // this changes stack trace
 			}
 		}()
-
 		body(nextFlow)
+	}()
 
-		nextFlow.stop()
-		kill <- 1
-		flow.next = nil
-	})
+	nextFlow.stop()
+	kill <- 1
+	flow.next = nil
 }
 
 func (flow *Flow) New(opts Opts, fn Efn) {

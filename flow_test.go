@@ -54,6 +54,9 @@ func TestEvents(t *testing.T) {
 							flow.TermTransfer(Opts{}, func(_ *Flow, e term.Event) {
 								result += "_B" + string(e.Ch)
 							})
+							flow.TermTransfer(Opts{}, func(_ *Flow, e term.Event) {
+								result += "_XXX" + string(e.Ch)
+							})
 						},
 					)
 				case 'C':
