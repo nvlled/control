@@ -85,11 +85,6 @@ func (flow *Flow) stopAll() {
 	}
 }
 
-func (flow *Flow) Stop() {
-	// not creating a goroutine here will result in a lockup
-	go flow.stopAll()
-}
-
 func (flow *Flow) Send(e interface{}) {
 	for flow.prev != nil {
 		flow = flow.prev
