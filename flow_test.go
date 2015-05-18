@@ -34,9 +34,13 @@ func TestEvents(t *testing.T) {
 				EventEnded: func(_ interface{}) {
 					ecount++
 				},
-				Interrupt: func(e interface{}, stop func()) {
+				Interrupt: func(e interface{}, ir Irctrl) {
 					if _, ok := e.(int); ok {
-						stop()
+						ir.Stop()
+					} else if e, ok := e.(term.Event); ok {
+						if e.Ch == '←' {
+							ir.StopNext()
+						}
 					}
 				},
 			},
@@ -98,4 +102,5 @@ func TestEvents(t *testing.T) {
 	testRun("12C345E67e8c9", "_A1_A2_C3_C4_C5_E6_E7_C8_A9")
 	testRun("CEec1234", "_A1_A2_A3_A4")
 	testRun("BEeb1234", "_BE_Be_A1_A2_A3_A4")
+	testRun("12C←34CE←56", "_A1_A2_A3_A4_A5_A6")
 }

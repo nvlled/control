@@ -5,7 +5,7 @@ import (
 	term "github.com/nsf/termbox-go"
 )
 
-type Interrupt func(e interface{}, stop func())
+type Interrupt func(e interface{}, ir Irctrl)
 
 type Opts struct {
 	EventEnded      func(interface{})
@@ -29,6 +29,31 @@ type Tfn func(*Flow, interface{})
 type Keymap map[term.Key]func(*Flow)
 
 type Source func() (interface{}, bool)
+
+type Irctrl interface {
+	Stop()
+	StopNext()
+}
+
+type irctrl struct {
+	flow        *Flow
+	nextStopped bool
+}
+
+func newIrctrl(flow *Flow) *irctrl {
+	return &irctrl{flow, false}
+}
+
+func (ic *irctrl) Stop() {
+	ic.flow.stopAll()
+}
+
+func (ic *irctrl) StopNext() {
+	if ic.flow.next != nil {
+		ic.flow.next.stopAll()
+		ic.nextStopped = true
+	}
+}
 
 func NewFlow() *Flow {
 	return &Flow{
@@ -128,16 +153,19 @@ func (flow *Flow) run(opts Opts, body func(*Flow)) {
 			select {
 			case e := <-flow.c:
 
+				ir := newIrctrl(nextFlow)
 				if opts.Interrupt != nil {
-					opts.Interrupt(e, nextFlow.stopAll)
+					opts.Interrupt(e, ir)
 				}
 
 				if !flow.stopped {
 					flow.counter.Inc()
-					func() {
-						defer func() { recover() }()
-						nextFlow.c <- e
-					}()
+					if !ir.nextStopped {
+						func() {
+							defer func() { recover() }()
+							nextFlow.c <- e
+						}()
+					}
 				}
 			case <-kill:
 				return
@@ -196,36 +224,36 @@ func OfTermTfn(fn func(*Flow, term.Event)) Tfn {
 }
 
 func Interrupts(intps ...Interrupt) Interrupt {
-	return func(e interface{}, stop func()) {
+	return func(e interface{}, ir Irctrl) {
 		for _, fn := range intps {
-			fn(e, stop)
+			fn(e, ir)
 		}
 	}
 }
 
-func TermInterrupt(fn func(term.Event, func())) Interrupt {
-	return func(e interface{}, stop func()) {
+func TermInterrupt(fn func(term.Event, Irctrl)) Interrupt {
+	return func(e interface{}, ir Irctrl) {
 		if e, ok := e.(term.Event); ok {
-			fn(e, stop)
+			fn(e, ir)
 		}
 	}
 }
 
 func CharInterrupt(chars ...rune) Interrupt {
-	return func(e interface{}, stop func()) {
+	return func(e interface{}, ir Irctrl) {
 		for _, ch := range chars {
 			if e, ok := e.(term.Event); ok && e.Ch == ch {
-				stop()
+				ir.Stop()
 			}
 		}
 	}
 }
 
 func KeyInterrupt(keys ...term.Key) Interrupt {
-	return func(e interface{}, stop func()) {
+	return func(e interface{}, ir Irctrl) {
 		for _, key := range keys {
 			if e, ok := e.(term.Event); ok && e.Key == key {
-				stop()
+				ir.Stop()
 			}
 		}
 	}
