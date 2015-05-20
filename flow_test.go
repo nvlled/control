@@ -104,3 +104,24 @@ func TestEvents(t *testing.T) {
 	testRun("BEeb1234", "_BE_Be_A1_A2_A3_A4")
 	testRun("12C←34CE←56", "_A1_A2_A3_A4_A5_A6")
 }
+
+func TestBlock(t *testing.T) {
+	events := make(chan interface{}, 5)
+	events <- 1
+	source := func() (interface{}, bool) {
+		e, ok := <-events
+		return e, ok
+	}
+	New(
+		source,
+		Opts{Interrupt: func(e interface{}, ir Irctrl) {
+			ir.Stop()
+		}},
+		func(flow *Flow) {
+			Cancellable(flow, func() {
+				time.Sleep(10 * time.Second)
+			})
+		},
+	)
+	println("no waiting")
+}

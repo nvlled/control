@@ -63,6 +63,10 @@ func NewFlow() *Flow {
 	}
 }
 
+func (flow *Flow) IsDead() bool {
+	return flow.stopped
+}
+
 func (flow *Flow) stop() {
 	if !flow.stopped {
 		close(flow.c)
@@ -290,4 +294,21 @@ func Start(source Source, opts Opts, fn Tfn) {
 
 func TermStart(source Source, opts Opts, fn func(*Flow, term.Event)) {
 	Start(source, opts, OfTermTfn(fn))
+}
+
+func Cancellable(flow *Flow, fn func()) {
+	val := 0xfacebeef
+	sentinel := &val
+
+	go func() {
+		fn()
+		flow.Send(sentinel)
+	}()
+	intp := func(e interface{}, ir Irctrl) {
+		if e == sentinel {
+			ir.Stop()
+		}
+	}
+	flow.Transfer(Opts{Interrupt: intp}, func(_ *Flow, _ interface{}) {
+	})
 }
